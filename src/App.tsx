@@ -21,8 +21,20 @@ import {
   Building,
   Image,
   Sparkles,
-  TrendingUp
+  TrendingUp,
+  Smartphone,
+  Radio,
+  Share2,
+  Volume2,
+  VolumeX,
+  Tv
 } from 'lucide-react';
+import { realtimeClient, audioService, ConnectedDevice, StateUpdateEvent } from './realtime';
+import { LiveCourtFeed, ViewRole } from './LiveCourtFeed';
+import { MultiDeviceModal } from './MultiDeviceModal';
+import { CommentatorHub } from './CommentatorHub';
+import { CourtFocusScorer } from './CourtFocusScorer';
+import { SpectatorDisplay } from './SpectatorDisplay';
 
 // pre-seeded roster of 12 sample players for full immediate rotation demo
 const SAMPLE_ROSTER: Player[] = [
@@ -74,6 +86,24 @@ export default function App() {
   const [fullscreenMatchId, setFullscreenMatchId] = useState<string | null>(null);
   const [summaryMatch, setSummaryMatch] = useState<Match | null>(null);
 
+  // Multi-Device Real-Time & Live Feed States
+  const [currentRole, setCurrentRole] = useState<ViewRole>('host');
+  const [connectedCount, setConnectedCount] = useState<number>(1);
+  const [connectedDevices, setConnectedDevices] = useState<ConnectedDevice[]>([]);
+  const [multiDeviceModalOpen, setMultiDeviceModalOpen] = useState(false);
+  const [lastRemoteAction, setLastRemoteAction] = useState<{
+    type: string;
+    courtId?: string;
+    actionDetail?: string;
+    timestamp: number;
+  } | null>(null);
+  const [recentActions, setRecentActions] = useState<Array<{
+    id: string;
+    courtId: string;
+    detail: string;
+    timestamp: number;
+  }>>([]);
+
   const activeSportInfo = SPORTS_LIST.find((s) => s.id === config.activeSport) || SPORTS_LIST[0];
 
   // 1. Session Duration Countdown Timer Engine
@@ -92,32 +122,146 @@ export default function App() {
     };
   }, [config.timerActive, config.remainingSeconds]);
 
-  // Sync state with local storage on startup and updates
+  // Sync state with local storage and WebSocket on startup and updates
   useEffect(() => {
-    const saved = localStorage.getItem('casual_rotation_session');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.config) setConfig(parsed.config);
-        if (parsed.players) setPlayers(parsed.players);
-        if (parsed.completedMatches) setCompletedMatches(parsed.completedMatches);
-        if (parsed.activeMatches) setActiveMatches(parsed.activeMatches);
-      } catch (e) {
-        console.error('Failed to parse cached session data', e);
-      }
+    // 1. Initialize view role from URL query param (?view=court_1, court_2, commentator, spectator, host)
+    const urlParams = new URLSearchParams(window.location.search);
+    const viewParam = urlParams.get('view') as ViewRole | null;
+    let initialRole: ViewRole = 'host';
+    if (viewParam && ['host', 'court_1', 'court_2', 'court_3', 'court_4', 'commentator', 'spectator'].includes(viewParam)) {
+      initialRole = viewParam;
+      setCurrentRole(initialRole);
     }
+
+    const roleLabels: Record<string, string> = {
+      court_1: 'Court 1 Scorer Phone',
+      court_2: 'Court 2 Scorer Phone',
+      court_3: 'Court 3 Scorer Phone',
+      court_4: 'Court 4 Scorer Phone',
+      commentator: 'Commentator Desk',
+      spectator: 'Spectator Display',
+      host: 'Host Control'
+    };
+    realtimeClient.setRole(initialRole, roleLabels[initialRole] || 'Connected Device');
+
+    // 2. Connect WebSocket
+    realtimeClient.connect();
+
+    // 3. Fetch server authoritative state bootstrap for instant sync across devices
+    realtimeClient.fetchServerState().then((serverData) => {
+      if (serverData) {
+        if (serverData.config) setConfig(serverData.config);
+        if (serverData.players && serverData.players.length > 0) setPlayers(serverData.players);
+        if (serverData.activeMatches) setActiveMatches(serverData.activeMatches);
+        if (serverData.completedMatches) setCompletedMatches(serverData.completedMatches);
+      } else {
+        // Fallback to local storage if server has no saved state yet
+        const saved = localStorage.getItem('casual_rotation_session');
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            if (parsed.config) setConfig(parsed.config);
+            if (parsed.players) setPlayers(parsed.players);
+            if (parsed.completedMatches) setCompletedMatches(parsed.completedMatches);
+            if (parsed.activeMatches) setActiveMatches(parsed.activeMatches);
+            // Broadcast initial local state to server so server has it
+            realtimeClient.broadcast(parsed, 'INIT_UPLOAD', undefined, 'Initial session synced');
+          } catch (e) {
+            console.error('Failed to parse cached session data', e);
+          }
+        }
+      }
+    });
+
+    // 4. Listen to incoming real-time state updates from other devices
+    const unsubState = realtimeClient.onStateUpdate((event) => {
+      if (event.payload) {
+        const p = event.payload;
+        if (p.config) setConfig(p.config);
+        if (p.players) setPlayers(p.players);
+        if (p.activeMatches) setActiveMatches(p.activeMatches);
+        if (p.completedMatches) setCompletedMatches(p.completedMatches);
+
+        localStorage.setItem('casual_rotation_session', JSON.stringify(p));
+      }
+
+      if (event.action || event.actionDetail) {
+        const actionObj = {
+          type: event.action || 'UPDATE',
+          courtId: event.courtId,
+          actionDetail: event.actionDetail,
+          timestamp: event.timestamp || Date.now()
+        };
+        setLastRemoteAction(actionObj);
+
+        setRecentActions(prev => [
+          {
+            id: 'act_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+            courtId: event.courtId || 'court_1',
+            detail: event.actionDetail || 'Score updated',
+            timestamp: Date.now()
+          },
+          ...prev.slice(0, 30)
+        ]);
+      }
+    });
+
+    // 5. Track connected devices count and presence
+    const unsubPresence = realtimeClient.onPresence((count, devices) => {
+      setConnectedCount(count);
+      setConnectedDevices(devices);
+    });
+
+    return () => {
+      unsubState();
+      unsubPresence();
+    };
   }, []);
 
-  const saveToLocal = (nextPlayers = players, nextMatches = activeMatches, nextCompleted = completedMatches, nextConfig = config) => {
+  const handleSelectRole = (role: ViewRole) => {
+    setCurrentRole(role);
+    const roleLabels: Record<string, string> = {
+      court_1: 'Court 1 Scorer Phone',
+      court_2: 'Court 2 Scorer Phone',
+      court_3: 'Court 3 Scorer Phone',
+      court_4: 'Court 4 Scorer Phone',
+      commentator: 'Commentator Desk',
+      spectator: 'Spectator Display',
+      host: 'Host Control'
+    };
+    realtimeClient.setRole(role, roleLabels[role] || 'Connected Device');
+
+    // Update URL without page reload
+    const url = new URL(window.location.href);
+    if (role === 'host') {
+      url.searchParams.delete('view');
+    } else {
+      url.searchParams.set('view', role);
+    }
+    window.history.replaceState({}, '', url.toString());
+  };
+
+  const saveToLocal = (
+    nextPlayers = players, 
+    nextMatches = activeMatches, 
+    nextCompleted = completedMatches, 
+    nextConfig = config,
+    action?: string,
+    courtId?: string,
+    actionDetail?: string
+  ) => {
+    const fullState = {
+      config: nextConfig,
+      players: nextPlayers,
+      activeMatches: nextMatches,
+      completedMatches: nextCompleted
+    };
     localStorage.setItem(
       'casual_rotation_session',
-      JSON.stringify({
-        config: nextConfig,
-        players: nextPlayers,
-        activeMatches: nextMatches,
-        completedMatches: nextCompleted
-      })
+      JSON.stringify(fullState)
     );
+    // Broadcast instantly to all other connected phones and screens!
+    realtimeClient.broadcast(fullState, action, courtId, actionDetail);
   };
 
   const updatePlayersAndSave = (next: Player[]) => {
@@ -414,23 +558,52 @@ export default function App() {
     setConfettiActive(true);
     setTimeout(() => setConfettiActive(false), 4500);
 
+    const courtNum = match.courtId === 'court_1' ? '1' : match.courtId === 'court_2' ? '2' : match.courtId === 'court_3' ? '3' : '4';
+    const detailMsg = `🏆 Court ${courtNum}: ${winnerNames} Won the Match!`;
+
+    audioService.playVictoryFanfare();
+
+    // Broadcast winner declaration across all devices
+    saveToLocal(nextPlayers, nextMatches, nextCompleted, config, 'MATCH_FINISHED', match.courtId, detailMsg);
+
     // Trigger End of Match Summary Modal
     setSummaryMatch(finalMatch);
   };
 
   const handleUpdateScore = (matchId: string, team: 'A' | 'B', delta: number) => {
+    let targetCourtId = 'court_1';
+    let targetScore = 0;
+    let targetTeamName = team === 'A' ? 'Team A' : 'Team B';
+
     const nextMatches = activeMatches.map(m => {
       if (m.id !== matchId) return m;
+      targetCourtId = m.courtId;
       const updated = { ...m };
       if (team === 'A') {
         updated.scoreA = Math.max(0, updated.scoreA + delta);
+        targetScore = updated.scoreA;
+        const names = m.teamA.map(getPlayerName).join(' & ');
+        if (names) targetTeamName = names;
       } else {
         updated.scoreB = Math.max(0, updated.scoreB + delta);
+        targetScore = updated.scoreB;
+        const names = m.teamB.map(getPlayerName).join(' & ');
+        if (names) targetTeamName = names;
       }
       return updated;
     });
+
+    const courtNum = targetCourtId === 'court_1' ? '1' : targetCourtId === 'court_2' ? '2' : targetCourtId === 'court_3' ? '3' : '4';
+    const detailMsg = delta > 0 
+      ? `Court ${courtNum}: ${targetTeamName} +1 point (${targetScore})`
+      : `Court ${courtNum}: ${targetTeamName} -1 point (${targetScore})`;
+
     setActiveMatches(nextMatches);
-    saveToLocal(players, nextMatches, completedMatches, config);
+    saveToLocal(players, nextMatches, completedMatches, config, 'SCORE_UPDATE', targetCourtId, detailMsg);
+
+    if (delta > 0) {
+      audioService.playScoreChime(parseInt(courtNum, 10) || 1);
+    }
   };
 
   // Revert / Clear active court match without logging statistics
@@ -526,6 +699,382 @@ export default function App() {
     .filter(p => p.status === 'resting' && !playingIds.includes(p.id))
     .sort((a, b) => b.restRounds - a.restRounds);
 
+  // Helper to render Fullscreen Scoreboard modal across all view roles
+  const renderFullscreenScoreboard = () => {
+    if (!fullscreenMatchId) return null;
+    const match = activeMatches.find(m => m.id === fullscreenMatchId);
+    if (!match) return null;
+    
+    const courtLabel = match.courtId === 'court_1' ? 'Court 1' : match.courtId === 'court_2' ? 'Court 2' : match.courtId === 'court_3' ? 'Court 3' : 'Court 4';
+    const teamANames = match.teamA.map(getPlayerName).join(' & ');
+    const teamBNames = match.teamB.map(getPlayerName).join(' & ');
+
+    const handleNativeFullscreen = () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch((err) => {
+          console.warn('Native fullscreen request blocked:', err);
+        });
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    };
+
+    const otherCourtId = match.courtId === 'court_1' ? 'court_2' : 'court_1';
+    const otherCourtNum = otherCourtId === 'court_1' ? '1' : '2';
+    const otherMatch = activeMatches.find(m => m.courtId === otherCourtId);
+
+    return (
+      <div className="fixed inset-0 z-50 bg-[#02050f] flex flex-col justify-between p-6 sm:p-10 animate-fade-in overflow-hidden">
+        {/* Header branding */}
+        <div className="flex items-center justify-between border-b border-slate-900 pb-4">
+          <div className="flex items-center gap-3">
+            {config.clubLogoUrl ? (
+              <img src={config.clubLogoUrl} alt="Club" className="h-10 w-auto object-contain bg-slate-950 p-1 rounded-lg border border-slate-800" />
+            ) : (
+              <span className="text-xl">{activeSportInfo.emoji}</span>
+            )}
+            <div>
+              <h2 className="text-sm font-black text-white uppercase tracking-wider font-mono">
+                {config.clubName || 'CourtCraft Live'}
+              </h2>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                {courtLabel} — Live Scoreboard
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Live Feed Badge of the OTHER court */}
+            {otherMatch && (
+              <div className="hidden sm:flex items-center gap-2 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-800 text-xs font-mono">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-slate-400">Court {otherCourtNum}:</span>
+                <span className="font-bold text-white">{otherMatch.scoreA} - {otherMatch.scoreB}</span>
+              </div>
+            )}
+
+            <button
+              onClick={handleNativeFullscreen}
+              className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-xs font-bold text-slate-300 transition-colors flex items-center gap-1.5 cursor-pointer"
+              title="Toggle Fullscreen API"
+            >
+              📺 Native Fullscreen
+            </button>
+            <button
+              onClick={() => setFullscreenMatchId(null)}
+              className="px-4 py-2 rounded-xl text-xs font-extrabold uppercase bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-950/40 cursor-pointer transition-all"
+            >
+              Exit Scoreboard
+            </button>
+          </div>
+        </div>
+
+        {/* Giant score area with left/right touch points */}
+        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 relative gap-4 my-6">
+          {/* Team A side */}
+          <button
+            type="button"
+            onClick={() => handleUpdateScore(match.id, 'A', 1)}
+            className="w-full h-full rounded-2xl bg-slate-950/40 hover:bg-slate-900/10 border border-slate-900 transition-all flex flex-col justify-between p-8 text-left relative focus:outline-none cursor-pointer group/fA active:scale-[0.99]"
+            style={{ boxShadow: `0 0 40px -10px ${primaryColor}10` }}
+          >
+            <div className="space-y-1">
+              <span className="text-xs font-black uppercase tracking-wider text-slate-500 font-mono">Team A</span>
+              <div className="space-y-1">
+                {match.teamA.map(id => (
+                  <h3 key={id} className="text-2xl sm:text-4xl font-black text-white leading-tight">
+                    {getPlayerName(id)}
+                  </h3>
+                ))}
+              </div>
+            </div>
+            
+            <span 
+              className="text-[10rem] sm:text-[14rem] md:text-[18rem] font-black font-display text-white leading-none mx-auto select-none transition-all group-hover/fA:scale-105"
+              style={{ textShadow: `0 0 40px ${primaryColor}70` }}
+            >
+              {match.scoreA}
+            </span>
+
+            <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mt-auto">
+              Tap anywhere on left side to Score +1
+            </span>
+          </button>
+
+          {/* Team B side */}
+          <button
+            type="button"
+            onClick={() => handleUpdateScore(match.id, 'B', 1)}
+            className="w-full h-full rounded-2xl bg-slate-950/40 hover:bg-slate-900/10 border border-slate-900 transition-all flex flex-col justify-between p-8 text-right relative focus:outline-none cursor-pointer group/fB active:scale-[0.99]"
+            style={{ boxShadow: `0 0 40px -10px ${primaryColor}10` }}
+          >
+            <div className="space-y-1 text-right">
+              <span className="text-xs font-black uppercase tracking-wider text-slate-500 font-mono block">Team B</span>
+              <div className="space-y-1">
+                {match.teamB.map(id => (
+                  <h3 key={id} className="text-2xl sm:text-4xl font-black text-white leading-tight">
+                    {getPlayerName(id)}
+                  </h3>
+                ))}
+              </div>
+            </div>
+            
+            <span 
+              className="text-[10rem] sm:text-[14rem] md:text-[18rem] font-black font-display text-white leading-none mx-auto select-none transition-all group-hover/fB:scale-105"
+              style={{ textShadow: `0 0 40px ${primaryColor}70` }}
+            >
+              {match.scoreB}
+            </span>
+
+            <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mt-auto ml-auto block">
+              Tap anywhere on right side to Score +1
+            </span>
+          </button>
+
+          {/* Central Divider line with "VS" badge */}
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden md:flex w-12 h-12 rounded-full bg-slate-950 border border-slate-900 items-center justify-center text-xs font-black font-mono text-slate-500 z-20 pointer-events-none">
+            VS
+          </div>
+        </div>
+
+        {/* Bottom Actions footer controls */}
+        <div className="px-6 py-4 rounded-2xl bg-slate-950/60 border border-slate-900 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleUpdateScore(match.id, 'A', -1)}
+              disabled={match.scoreA === 0}
+              className="px-4 py-2 bg-slate-900 hover:bg-slate-850 rounded-xl text-xs font-black text-slate-300 border border-slate-800 disabled:opacity-30 cursor-pointer"
+            >
+              Undo Team A (-1)
+            </button>
+            <button
+              onClick={() => handleUpdateScore(match.id, 'B', -1)}
+              disabled={match.scoreB === 0}
+              className="px-4 py-2 bg-slate-900 hover:bg-slate-850 rounded-xl text-xs font-black text-slate-300 border border-slate-800 disabled:opacity-30 cursor-pointer"
+            >
+              Undo Team B (-1)
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                handleDeclareWinner(match.id, 'A');
+                setFullscreenMatchId(null);
+              }}
+              className="px-5 py-2.5 rounded-xl text-xs font-black uppercase text-slate-950 cursor-pointer hover:brightness-110"
+              style={{ backgroundColor: primaryColor }}
+            >
+              🏆 Declare Team A Winner
+            </button>
+            <button
+              onClick={() => {
+                handleDeclareWinner(match.id, 'B');
+                setFullscreenMatchId(null);
+              }}
+              className="px-5 py-2.5 rounded-xl text-xs font-black uppercase text-slate-950 cursor-pointer hover:brightness-110"
+              style={{ backgroundColor: primaryColor }}
+            >
+              🏆 Declare Team B Winner
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Helper to render End of Match Summary modal across all view roles
+  const renderSummaryMatchModal = () => {
+    if (!summaryMatch) return null;
+    const courtLabel = summaryMatch.courtId === 'court_1' ? 'Court 1' : summaryMatch.courtId === 'court_2' ? 'Court 2' : summaryMatch.courtId === 'court_3' ? 'Court 3' : 'Court 4';
+    const teamANames = summaryMatch.teamA.map(getPlayerName).join(' & ');
+    const teamBNames = summaryMatch.teamB.map(getPlayerName).join(' & ');
+    const winner = summaryMatch.winner;
+    
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        {/* Backdrop */}
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-xs" onClick={() => setSummaryMatch(null)} />
+
+        {/* Modal Box */}
+        <div className="relative w-full max-w-md bg-[#040914] border border-slate-900 rounded-3xl p-6 shadow-2xl z-10 animate-fade-in text-center space-y-6">
+          {/* Top Trophy header */}
+          <div className="flex flex-col items-center space-y-2">
+            <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-3xl animate-bounce">
+              🏆
+            </div>
+            <div className="space-y-0.5">
+              <h3 className="text-xs font-black uppercase text-emerald-400 tracking-wider">Match Completed</h3>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{courtLabel} Scoreboard Summary</p>
+            </div>
+          </div>
+
+          {/* Match Card Scores Comparison Grid */}
+          <div className="grid grid-cols-7 gap-1 items-center bg-slate-950/40 p-4 rounded-xl border border-slate-900">
+            {/* Team A names */}
+            <div className="col-span-3 text-center space-y-1">
+              <p className={`text-xs font-bold truncate ${winner === 'A' ? 'text-white font-black' : 'text-slate-400 opacity-60'}`}>
+                {teamANames}
+              </p>
+              <p className="text-[9px] text-slate-500 uppercase font-mono font-bold">Team A</p>
+              {winner === 'A' && (
+                <span className="text-[8px] bg-emerald-950 text-emerald-400 font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
+                  Winners
+                </span>
+              )}
+            </div>
+
+            {/* Score A */}
+            <div className="col-span-1 text-center font-mono text-xl font-black text-white">
+              {summaryMatch.scoreA}
+            </div>
+
+            {/* Separator */}
+            <div className="col-span-1 text-center text-slate-600 font-mono text-xs">
+              :
+            </div>
+
+            {/* Score B */}
+            <div className="col-span-1 text-center font-mono text-xl font-black text-white">
+              {summaryMatch.scoreB}
+            </div>
+
+            {/* Team B names */}
+            <div className="col-span-3 text-center space-y-1">
+              <p className={`text-xs font-bold truncate ${winner === 'B' ? 'text-white font-black' : 'text-slate-400 opacity-60'}`}>
+                {teamBNames}
+              </p>
+              <p className="text-[9px] text-slate-500 uppercase font-mono font-bold">Team B</p>
+              {winner === 'B' && (
+                <span className="text-[8px] bg-emerald-950 text-emerald-400 font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
+                  Winners
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="grid grid-cols-2 gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setSummaryMatch(null)}
+              className="py-2.5 rounded-xl text-xs font-bold text-slate-400 bg-slate-900 border border-slate-850 hover:bg-slate-850 hover:text-white transition-colors cursor-pointer"
+            >
+              Close Summary
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSummaryMatch(null);
+                setTimeout(() => {
+                  handleAutoAssign();
+                }, 150);
+              }}
+              className="py-2.5 rounded-xl text-xs font-black uppercase text-slate-950 transition-transform active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
+              style={{ backgroundColor: primaryColor }}
+            >
+              🚀 Next Rotation
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // View Mode: Commentator Desk
+  if (currentRole === 'commentator') {
+    return (
+      <>
+        <CommentatorHub
+          config={config}
+          players={players}
+          activeMatches={activeMatches}
+          completedMatches={completedMatches}
+          primaryColor={primaryColor}
+          sportEmoji={activeSportInfo.emoji}
+          recentActions={recentActions}
+          onBackToHost={() => handleSelectRole('host')}
+          onOpenFullscreen={(matchId) => setFullscreenMatchId(matchId)}
+          onScoreUpdate={handleUpdateScore}
+          onOpenMultiDevice={() => setMultiDeviceModalOpen(true)}
+        />
+        {renderFullscreenScoreboard()}
+        {renderSummaryMatchModal()}
+        <MultiDeviceModal
+          isOpen={multiDeviceModalOpen}
+          onClose={() => setMultiDeviceModalOpen(false)}
+          connectedCount={connectedCount}
+          connectedDevices={connectedDevices}
+          currentRole={currentRole}
+          primaryColor={primaryColor}
+          onSelectRole={handleSelectRole}
+        />
+      </>
+    );
+  }
+
+  // View Mode: Clubhouse TV Spectator Display
+  if (currentRole === 'spectator') {
+    return (
+      <>
+        <SpectatorDisplay
+          config={config}
+          players={players}
+          activeMatches={activeMatches}
+          completedMatches={completedMatches}
+          primaryColor={primaryColor}
+          sportEmoji={activeSportInfo.emoji}
+          lastRemoteAction={lastRemoteAction}
+          onBackToHost={() => handleSelectRole('host')}
+          onOpenMultiDevice={() => setMultiDeviceModalOpen(true)}
+        />
+        <MultiDeviceModal
+          isOpen={multiDeviceModalOpen}
+          onClose={() => setMultiDeviceModalOpen(false)}
+          connectedCount={connectedCount}
+          connectedDevices={connectedDevices}
+          currentRole={currentRole}
+          primaryColor={primaryColor}
+          onSelectRole={handleSelectRole}
+        />
+      </>
+    );
+  }
+
+  // View Mode: Court Scorer Phone/Tablet View (e.g. Court 1 or Court 2)
+  if (currentRole.startsWith('court_')) {
+    return (
+      <>
+        <CourtFocusScorer
+          courtId={currentRole as 'court_1' | 'court_2' | 'court_3' | 'court_4'}
+          config={config}
+          players={players}
+          activeMatches={activeMatches}
+          primaryColor={primaryColor}
+          sportEmoji={activeSportInfo.emoji}
+          lastRemoteAction={lastRemoteAction}
+          onBackToHost={() => handleSelectRole('host')}
+          onUpdateScore={handleUpdateScore}
+          onDeclareWinner={handleDeclareWinner}
+          onOpenFullscreen={(matchId) => setFullscreenMatchId(matchId)}
+          onOpenMultiDevice={() => setMultiDeviceModalOpen(true)}
+          onSwitchCourt={(newCourtId) => handleSelectRole(newCourtId)}
+        />
+        {renderFullscreenScoreboard()}
+        {renderSummaryMatchModal()}
+        <MultiDeviceModal
+          isOpen={multiDeviceModalOpen}
+          onClose={() => setMultiDeviceModalOpen(false)}
+          connectedCount={connectedCount}
+          connectedDevices={connectedDevices}
+          currentRole={currentRole}
+          primaryColor={primaryColor}
+          onSelectRole={handleSelectRole}
+        />
+      </>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#02050e] text-slate-100 flex flex-col font-sans select-none antialiased">
       
@@ -565,7 +1114,37 @@ export default function App() {
           </div>
 
           {/* Quick Stats Banner or Actions */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
+            {/* Multi-Device Live Feeds button */}
+            <button
+              onClick={() => setMultiDeviceModalOpen(true)}
+              className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-xs font-mono font-bold text-slate-200 cursor-pointer transition-all shadow-sm"
+              title="Connect other phones, umpire devices & QR Code"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">Live Feeds</span>
+              <span className="flex items-center gap-1 text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.2 rounded-full border border-emerald-500/30">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                {connectedCount} Online
+              </span>
+            </button>
+
+            {/* View Mode Quick Switcher */}
+            <select
+              value={currentRole}
+              onChange={(e) => handleSelectRole(e.target.value as ViewRole)}
+              className="bg-slate-900 hover:bg-slate-850 text-slate-300 font-mono text-xs font-bold px-2.5 py-2 rounded-xl border border-slate-800 focus:outline-none cursor-pointer"
+              title="Switch role view on this device"
+            >
+              <option value="host">👑 Host Dashboard</option>
+              <option value="court_1">🎾 Court 1 Scorer</option>
+              <option value="court_2">🎾 Court 2 Scorer</option>
+              {config.activeCourts >= 3 && <option value="court_3">🎾 Court 3 Scorer</option>}
+              {config.activeCourts >= 4 && <option value="court_4">🎾 Court 4 Scorer</option>}
+              <option value="commentator">🎙️ Commentator Desk</option>
+              <option value="spectator">📺 Clubhouse TV Board</option>
+            </select>
+
             <button
               onClick={() => setHelpOpen(true)}
               className="p-2 rounded-xl bg-slate-900/60 border border-slate-800 text-slate-400 hover:text-white transition-colors"
@@ -575,10 +1154,10 @@ export default function App() {
             </button>
             <button
               onClick={() => setAdminOpen(true)}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-300 cursor-pointer transition-all"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-xs font-bold text-slate-300 cursor-pointer transition-all"
             >
               <Settings className="w-3.5 h-3.5" style={{ color: primaryColor }} />
-              <span>Session Setup</span>
+              <span className="hidden sm:inline">Session Setup</span>
             </button>
           </div>
 
@@ -895,6 +1474,20 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          {/* Real-time Cross-Court Live Feeds Widget */}
+          <LiveCourtFeed
+            currentRole={currentRole}
+            activeMatches={activeMatches}
+            players={players}
+            primaryColor={primaryColor}
+            sportEmoji={activeSportInfo.emoji}
+            activeCourts={config.activeCourts}
+            lastRemoteAction={lastRemoteAction}
+            onSelectRole={handleSelectRole}
+            onOpenFullscreen={(matchId) => setFullscreenMatchId(matchId)}
+            onQuickScore={handleUpdateScore}
+          />
 
           {/* B. SIDE-BY-SIDE ACTIVE COURTS HUD */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1521,282 +2114,26 @@ export default function App() {
       )}
 
       {/* 7. IMMERSIVE THEATER FULLSCREEN SCOREBOARD */}
-      {fullscreenMatchId && (() => {
-        const match = activeMatches.find(m => m.id === fullscreenMatchId);
-        if (!match) return null;
-        
-        const courtLabel = match.courtId === 'court_1' ? 'Court 1' : 'Court 2';
-        const teamANames = match.teamA.map(getPlayerName).join(' & ');
-        const teamBNames = match.teamB.map(getPlayerName).join(' & ');
-
-        const handleNativeFullscreen = () => {
-          if (!document.fullscreenElement) {
-            document.documentElement.requestFullscreen().catch((err) => {
-              console.warn('Native fullscreen request blocked:', err);
-            });
-          } else {
-            document.exitFullscreen().catch(() => {});
-          }
-        };
-
-        return (
-          <div className="fixed inset-0 z-50 bg-[#02050f] flex flex-col justify-between p-6 sm:p-10 animate-fade-in overflow-hidden">
-            
-            {/* Header branding */}
-            <div className="flex items-center justify-between border-b border-slate-900 pb-4">
-              <div className="flex items-center gap-3">
-                {config.clubLogoUrl ? (
-                  <img src={config.clubLogoUrl} alt="Club" className="h-10 w-auto object-contain bg-slate-950 p-1 rounded-lg border border-slate-800" />
-                ) : (
-                  <span className="text-xl">{activeSportInfo.emoji}</span>
-                )}
-                <div>
-                  <h2 className="text-sm font-black text-white uppercase tracking-wider font-mono">
-                    {config.clubName || 'CourtCraft Live'}
-                  </h2>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                    {courtLabel} — Live Scoreboard
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleNativeFullscreen}
-                  className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-xs font-bold text-slate-300 transition-colors flex items-center gap-1.5 cursor-pointer"
-                  title="Toggle Fullscreen API"
-                >
-                  📺 Native Fullscreen
-                </button>
-                <button
-                  onClick={() => setFullscreenMatchId(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-extrabold uppercase bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-950/40 cursor-pointer transition-all"
-                >
-                  Exit Scoreboard
-                </button>
-              </div>
-            </div>
-
-            {/* Giant score area with left/right touch points */}
-            <div className="flex-1 grid grid-cols-1 md:grid-cols-2 relative gap-4 my-6">
-              
-              {/* Team A side */}
-              <button
-                type="button"
-                onClick={() => handleUpdateScore(match.id, 'A', 1)}
-                className="w-full h-full rounded-2xl bg-slate-950/40 hover:bg-slate-900/10 border border-slate-900 transition-all flex flex-col justify-between p-8 text-left relative focus:outline-none cursor-pointer group/fA active:scale-[0.99]"
-                style={{ boxShadow: `0 0 40px -10px ${primaryColor}10` }}
-              >
-                <div className="space-y-1">
-                  <span className="text-xs font-black uppercase tracking-wider text-slate-500 font-mono">Team A</span>
-                  <div className="space-y-1">
-                    {match.teamA.map(id => (
-                      <h3 key={id} className="text-2xl sm:text-4xl font-black text-white leading-tight">
-                        {getPlayerName(id)}
-                      </h3>
-                    ))}
-                  </div>
-                </div>
-                
-                <span 
-                  className="text-[10rem] sm:text-[14rem] md:text-[18rem] font-black font-display text-white leading-none mx-auto select-none transition-all group-hover/fA:scale-105"
-                  style={{ textShadow: `0 0 40px ${primaryColor}70` }}
-                >
-                  {match.scoreA}
-                </span>
-
-                <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mt-auto">
-                  Tap anywhere on left side to Score +1
-                </span>
-              </button>
-
-              {/* Team B side */}
-              <button
-                type="button"
-                onClick={() => handleUpdateScore(match.id, 'B', 1)}
-                className="w-full h-full rounded-2xl bg-slate-950/40 hover:bg-slate-900/10 border border-slate-900 transition-all flex flex-col justify-between p-8 text-right relative focus:outline-none cursor-pointer group/fB active:scale-[0.99]"
-                style={{ boxShadow: `0 0 40px -10px ${primaryColor}10` }}
-              >
-                <div className="space-y-1 text-right">
-                  <span className="text-xs font-black uppercase tracking-wider text-slate-500 font-mono block">Team B</span>
-                  <div className="space-y-1">
-                    {match.teamB.map(id => (
-                      <h3 key={id} className="text-2xl sm:text-4xl font-black text-white leading-tight">
-                        {getPlayerName(id)}
-                      </h3>
-                    ))}
-                  </div>
-                </div>
-                
-                <span 
-                  className="text-[10rem] sm:text-[14rem] md:text-[18rem] font-black font-display text-white leading-none mx-auto select-none transition-all group-hover/fB:scale-105"
-                  style={{ textShadow: `0 0 40px ${primaryColor}70` }}
-                >
-                  {match.scoreB}
-                </span>
-
-                <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mt-auto ml-auto block">
-                  Tap anywhere on right side to Score +1
-                </span>
-              </button>
-
-              {/* Central Divider line with "VS" badge */}
-              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden md:flex w-12 h-12 rounded-full bg-slate-950 border border-slate-900 items-center justify-center text-xs font-black font-mono text-slate-500 z-20 pointer-events-none">
-                VS
-              </div>
-            </div>
-
-            {/* Bottom Actions footer controls */}
-            <div className="px-6 py-4 rounded-2xl bg-slate-950/60 border border-slate-900 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => handleUpdateScore(match.id, 'A', -1)}
-                  disabled={match.scoreA === 0}
-                  className="px-4 py-2 bg-slate-900 hover:bg-slate-850 rounded-xl text-xs font-black text-slate-300 border border-slate-800 disabled:opacity-30 cursor-pointer"
-                >
-                  Undo Team A (-1)
-                </button>
-                <button
-                  onClick={() => handleUpdateScore(match.id, 'B', -1)}
-                  disabled={match.scoreB === 0}
-                  className="px-4 py-2 bg-slate-900 hover:bg-slate-850 rounded-xl text-xs font-black text-slate-300 border border-slate-800 disabled:opacity-30 cursor-pointer"
-                >
-                  Undo Team B (-1)
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => {
-                    handleDeclareWinner(match.id, 'A');
-                    setFullscreenMatchId(null);
-                  }}
-                  className="px-5 py-2.5 rounded-xl text-xs font-black uppercase text-slate-950 cursor-pointer hover:brightness-110"
-                  style={{ backgroundColor: primaryColor }}
-                >
-                  🏆 Declare Team A Winner
-                </button>
-                <button
-                  onClick={() => {
-                    handleDeclareWinner(match.id, 'B');
-                    setFullscreenMatchId(null);
-                  }}
-                  className="px-5 py-2.5 rounded-xl text-xs font-black uppercase text-slate-950 cursor-pointer hover:brightness-110"
-                  style={{ backgroundColor: primaryColor }}
-                >
-                  🏆 Declare Team B Winner
-                </button>
-              </div>
-            </div>
-
-          </div>
-        );
-      })()}
+      {renderFullscreenScoreboard()}
 
       {/* End of Match Summary Modal */}
-      {summaryMatch && (() => {
-        const courtLabel = summaryMatch.courtId === 'court_1' ? 'Court 1' : summaryMatch.courtId === 'court_2' ? 'Court 2' : summaryMatch.courtId === 'court_3' ? 'Court 3' : 'Court 4';
-        const teamANames = summaryMatch.teamA.map(getPlayerName).join(' & ');
-        const teamBNames = summaryMatch.teamB.map(getPlayerName).join(' & ');
-        const winner = summaryMatch.winner;
-        
-        return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            {/* Backdrop */}
-            <div className="absolute inset-0 bg-black/80 backdrop-blur-xs" onClick={() => setSummaryMatch(null)} />
-
-            {/* Modal Box */}
-            <div className="relative w-full max-w-md bg-[#040914] border border-slate-900 rounded-3xl p-6 shadow-2xl z-10 animate-fade-in text-center space-y-6">
-              
-              {/* Top Trophy header */}
-              <div className="flex flex-col items-center space-y-2">
-                <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-3xl animate-bounce">
-                  🏆
-                </div>
-                <div className="space-y-0.5">
-                  <h3 className="text-xs font-black uppercase text-emerald-400 tracking-wider">Match Completed</h3>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{courtLabel} Scoreboard Summary</p>
-                </div>
-              </div>
-
-              {/* Match Card Scores Comparison Grid */}
-              <div className="grid grid-cols-7 gap-1 items-center bg-slate-950/40 p-4 rounded-xl border border-slate-900">
-                {/* Team A names */}
-                <div className="col-span-3 text-center space-y-1">
-                  <p className={`text-xs font-bold truncate ${winner === 'A' ? 'text-white font-black' : 'text-slate-400 opacity-60'}`}>
-                    {teamANames}
-                  </p>
-                  <p className="text-[9px] text-slate-500 uppercase font-mono font-bold">Team A</p>
-                  {winner === 'A' && (
-                    <span className="text-[8px] bg-emerald-950 text-emerald-400 font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
-                      Winners
-                    </span>
-                  )}
-                </div>
-
-                {/* Score A */}
-                <div className="col-span-1 text-center font-mono text-xl font-black text-white">
-                  {summaryMatch.scoreA}
-                </div>
-
-                {/* Separator */}
-                <div className="col-span-1 text-center text-slate-600 font-mono text-xs">
-                  :
-                </div>
-
-                {/* Score B */}
-                <div className="col-span-1 text-center font-mono text-xl font-black text-white">
-                  {summaryMatch.scoreB}
-                </div>
-
-                {/* Team B names */}
-                <div className="col-span-3 text-center space-y-1">
-                  <p className={`text-xs font-bold truncate ${winner === 'B' ? 'text-white font-black' : 'text-slate-400 opacity-60'}`}>
-                    {teamBNames}
-                  </p>
-                  <p className="text-[9px] text-slate-500 uppercase font-mono font-bold">Team B</p>
-                  {winner === 'B' && (
-                    <span className="text-[8px] bg-emerald-950 text-emerald-400 font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
-                      Winners
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="grid grid-cols-2 gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setSummaryMatch(null)}
-                  className="py-2.5 rounded-xl text-xs font-bold text-slate-400 bg-slate-900 border border-slate-850 hover:bg-slate-850 hover:text-white transition-colors cursor-pointer"
-                >
-                  Close Summary
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSummaryMatch(null);
-                    // Slight timeout to let modal close cleanly before triggering assignment
-                    setTimeout(() => {
-                      handleAutoAssign();
-                    }, 150);
-                  }}
-                  className="py-2.5 rounded-xl text-xs font-black uppercase text-slate-950 transition-transform active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
-                  style={{ backgroundColor: primaryColor }}
-                >
-                  🚀 Next Rotation
-                </button>
-              </div>
-
-            </div>
-          </div>
-        );
-      })()}
+      {renderSummaryMatchModal()}
 
       {/* FOOTER */}
       <footer className="py-4 text-center text-[10px] text-slate-600 border-t border-slate-950 bg-slate-950/20">
         <span>CourtCraft Club Session Manager · Made for casual rackets & rotation play</span>
       </footer>
+
+      {/* Multi-Device Live Sync and Link Sharing Modal */}
+      <MultiDeviceModal
+        isOpen={multiDeviceModalOpen}
+        onClose={() => setMultiDeviceModalOpen(false)}
+        connectedCount={connectedCount}
+        connectedDevices={connectedDevices}
+        currentRole={currentRole}
+        primaryColor={primaryColor}
+        onSelectRole={handleSelectRole}
+      />
 
     </div>
   );
