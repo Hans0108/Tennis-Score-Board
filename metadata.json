@@ -1,0 +1,6 @@
+{
+  "name": "CourtCraft Pro",
+  "description": "Premium court-side scoring, intelligent court allocator, and tournament engine for Tennis, Padel, Pickleball, Badminton, and Table Tennis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

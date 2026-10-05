@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Plus Jakarta Sans', sans-serif;
+  --font-display: 'Syne', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+}
+
+/* Custom premium scrollbars & marquee keyframes */
+@keyframes marquee {
+  0% { transform: translateX(0%); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-marquee {
+  display: flex;
+  width: max-content;
+  animation: marquee 30s linear infinite;
+}
+
+/* Glow effect helper */
+.glow-neon-lime {
+  box-shadow: 0 0 20px -5px rgba(204, 255, 0, 0.4);
+}
+.glow-neon-magenta {
+  box-shadow: 0 0 20px -5px rgba(255, 0, 127, 0.4);
+}
+.glow-neon-orange {
+  box-shadow: 0 0 20px -5px rgba(255, 94, 0, 0.4);
+}
+.glow-neon-teal {
+  box-shadow: 0 0 20px -5px rgba(0, 255, 204, 0.4);
+}
+.glow-neon-blue {
+  box-shadow: 0 0 20px -5px rgba(0, 212, 255, 0.4);
+}
+
+/* Sparking pulse animation */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(0.98); }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
