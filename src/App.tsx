@@ -20,11 +20,12 @@ import {
   HelpCircle,
   Building,
   Image,
-  Sparkles
+  Sparkles,
+  TrendingUp
 } from 'lucide-react';
 
 // pre-seeded roster of 12 sample players for full immediate rotation demo
-const INITIAL_ROSTER: Player[] = [
+const SAMPLE_ROSTER: Player[] = [
   { id: 'p1', name: 'Joe Kent', status: 'resting', matchesPlayed: 4, wins: 3, losses: 1, restRounds: 2, consecutiveLosses: 0, netWins: 2 },
   { id: 'p2', name: 'Clarke Prince', status: 'resting', matchesPlayed: 5, wins: 4, losses: 1, restRounds: 1, consecutiveLosses: 0, netWins: 3 },
   { id: 'p3', name: 'Diana Prince', status: 'resting', matchesPlayed: 3, wins: 2, losses: 1, restRounds: 3, consecutiveLosses: 0, netWins: 1 },
@@ -42,10 +43,12 @@ const INITIAL_ROSTER: Player[] = [
 export default function App() {
   // Session Configuration & General States
   const [config, setConfig] = useState<SessionConfig>({
-    clubName: 'Vantage Racket Club',
+    clubName: '',
     activeCourts: 2,
     court1Players: 4,
     court2Players: 4,
+    court3Players: 4,
+    court4Players: 4,
     totalDurationMinutes: 180, // 3 hours
     remainingSeconds: 180 * 60,
     timerActive: false,
@@ -58,7 +61,7 @@ export default function App() {
     ]
   });
 
-  const [players, setPlayers] = useState<Player[]>(INITIAL_ROSTER);
+  const [players, setPlayers] = useState<Player[]>([]);
   const [activeMatches, setActiveMatches] = useState<Match[]>([]);
   const [completedMatches, setCompletedMatches] = useState<Match[]>([]);
   const [newPlayerName, setNewPlayerName] = useState('');
@@ -69,6 +72,7 @@ export default function App() {
   const [confettiActive, setConfettiActive] = useState(false);
   const [confettiMessage, setConfettiMessage] = useState('');
   const [fullscreenMatchId, setFullscreenMatchId] = useState<string | null>(null);
+  const [summaryMatch, setSummaryMatch] = useState<Match | null>(null);
 
   const activeSportInfo = SPORTS_LIST.find((s) => s.id === config.activeSport) || SPORTS_LIST[0];
 
@@ -210,27 +214,32 @@ export default function App() {
     updatePlayersAndSave(next);
   };
 
+  const handleTogglePlayerCourtPin = (id: string, pin: Player['courtPin']) => {
+    const next = players.map(p => {
+      if (p.id !== id) return p;
+      return { ...p, courtPin: pin };
+    });
+    updatePlayersAndSave(next);
+  };
+
   // Get active playing ids
   const getPlayingPlayerIds = () => {
     return activeMatches.flatMap(m => [...m.teamA, ...m.teamB]);
   };
 
-  // 3. Smart Rotation Matchmaking Algorithm
+  // 3. Smart Rotation Matchmaking Algorithm with Court Pinning / Shuffling
   const handleAutoAssign = () => {
-    const playingIds = getPlayingPlayerIds();
+    const playingIds = [...getPlayingPlayerIds()];
     
-    // Get list of players who are available to rotate on court (i.e. status is 'resting' and not away and not currently playing)
-    const availablePlayers = players.filter(
-      p => p.status === 'resting' && !playingIds.includes(p.id)
-    );
-
     // How many spots are we filling?
     // We can auto-fill open courts. Let's see which courts are idle:
     const occupiedCourtIds = activeMatches.map(m => m.courtId);
     const idleCourtIds: string[] = [];
-    if (!occupiedCourtIds.includes('court_1')) idleCourtIds.push('court_1');
-    if (config.activeCourts === 2 && !occupiedCourtIds.includes('court_2')) {
-      idleCourtIds.push('court_2');
+    for (let i = 1; i <= config.activeCourts; i++) {
+      const courtId = `court_${i}`;
+      if (!occupiedCourtIds.includes(courtId)) {
+        idleCourtIds.push(courtId);
+      }
     }
 
     if (idleCourtIds.length === 0) {
@@ -238,61 +247,62 @@ export default function App() {
       return;
     }
 
-    // Calculate sum of required players based on customizable capacity per idle court
-    let neededPlayers = 0;
-    idleCourtIds.forEach(courtId => {
-      const format = courtId === 'court_1' ? config.court1Players : config.court2Players;
-      neededPlayers += format;
-    });
+    const nextMatches: Match[] = [...activeMatches];
+    const assignedPlayerIds: string[] = [];
 
-    if (availablePlayers.length < neededPlayers) {
-      alert(
-        `Not enough available players to populate idle court(s)! You need at least ${neededPlayers} benched/resting players. Currently available: ${availablePlayers.length}.\n\nPlease add more players, or change courts to Singles format.`
-      );
-      return;
-    }
+    // Matchmaking court-by-court individually to respect specific court pin preferences
+    for (const courtId of idleCourtIds) {
+      let format = 4;
+      if (courtId === 'court_1') format = config.court1Players;
+      else if (courtId === 'court_2') format = config.court2Players;
+      else if (courtId === 'court_3') format = config.court3Players;
+      else if (courtId === 'court_4') format = config.court4Players;
 
-    // Sort available players to find who has benched/rested the most!
-    // Adding minor random sorting jitter to break ties dynamically & generate fresh pairings
-    const sortedForPlay = [...availablePlayers].sort((a, b) => {
-      if (b.restRounds !== a.restRounds) {
-        return b.restRounds - a.restRounds; // Highest benched rounds first
+      // Find available benched players eligible for this specific court
+      const eligibleForThisCourt = players.filter(p => {
+        const isBenched = p.status === 'resting';
+        const isCurrentlyPlaying = playingIds.includes(p.id) || assignedPlayerIds.includes(p.id);
+        const matchesPin = !p.courtPin || p.courtPin === 'any' || p.courtPin === courtId;
+        return isBenched && !isCurrentlyPlaying && matchesPin;
+      });
+
+      if (eligibleForThisCourt.length < format) {
+        const courtLabel = courtId === 'court_1' ? '1' : courtId === 'court_2' ? '2' : courtId === 'court_3' ? '3' : '4';
+        alert(
+          `Not enough resting players eligible for Court ${courtLabel}! This court requires ${format} players, but only ${eligibleForThisCourt.length} available players match this court's pin restrictions.\n\nPlease check if players are locked on other courts, or set their pin to "🔓 Shuffle" to allow dynamic mixer rotations.`
+        );
+        return;
       }
-      return Math.random() - 0.5; // Random tie-break
-    });
 
-    // Select the lucky players to enter court play
-    const selectedPlayers = sortedForPlay.slice(0, neededPlayers);
-    const newMatches: Match[] = [...activeMatches];
+      // Sort eligible players: longest benched first with minor random jitter
+      const sortedForPlay = [...eligibleForThisCourt].sort((a, b) => {
+        if (b.restRounds !== a.restRounds) {
+          return b.restRounds - a.restRounds;
+        }
+        return Math.random() - 0.5;
+      });
 
-    // For each idle court, allocate a beautiful balanced or random match (Singles 1v1 or Doubles 2v2)
-    let selectedIndex = 0;
-    idleCourtIds.forEach((courtId) => {
-      const format = courtId === 'court_1' ? config.court1Players : config.court2Players;
-      const courtPlayers = selectedPlayers.slice(selectedIndex, selectedIndex + format);
-      selectedIndex += format;
+      // Select players for this court
+      const courtPlayers = sortedForPlay.slice(0, format);
+      courtPlayers.forEach(p => assignedPlayerIds.push(p.id));
 
       let teamA: string[] = [];
       let teamB: string[] = [];
 
       if (format === 2) {
         // Singles match (1v1)
-        // Shuffled random assignment for 1v1 Singles
         const shuffled = [...courtPlayers].sort(() => Math.random() - 0.5);
         teamA = [shuffled[0].id];
         teamB = [shuffled[1].id];
       } else {
         // Doubles match (2v2)
         if (config.matchmakingMode === 'equal_rest') {
-          // Mode A: Shuffled Pairing from the equal-play roster list
           const shuffled = [...courtPlayers].sort(() => Math.random() - 0.5);
           teamA = [shuffled[0].id, shuffled[1].id];
           teamB = [shuffled[2].id, shuffled[3].id];
         } else {
-          // Mode B: Fair Handicap Balance (Pro + Beginner Pairing)
-          // Sort court's 4 players by net wins / win rate to identify strengths
+          // Mode B: Handicap Balance
           const sortedBySkill = [...courtPlayers].sort((a, b) => {
-            // Compare net wins, then win rate
             const netDiff = b.netWins - a.netWins;
             if (netDiff !== 0) return netDiff;
             const wrA = a.matchesPlayed > 0 ? a.wins / a.matchesPlayed : 0.5;
@@ -300,14 +310,12 @@ export default function App() {
             return wrB - wrA;
           });
 
-          // Team A: Best Player (1st) + Developing Player (4th)
           teamA = [sortedBySkill[0].id, sortedBySkill[3].id];
-          // Team B: Second Best (2nd) + Third Best (3rd)
           teamB = [sortedBySkill[1].id, sortedBySkill[2].id];
         }
       }
 
-      newMatches.push({
+      nextMatches.push({
         id: `match_${courtId}_${Date.now()}`,
         courtId,
         teamA,
@@ -318,20 +326,19 @@ export default function App() {
         winner: null,
         timestamp: Date.now()
       });
-    });
+    }
 
     // Mark selected players as active on courts
-    const selectedIds = selectedPlayers.map(p => p.id);
     const nextPlayers = players.map(p => {
-      if (selectedIds.includes(p.id)) {
+      if (assignedPlayerIds.includes(p.id)) {
         return { ...p, status: 'active' as const };
       }
       return p;
     });
 
     setPlayers(nextPlayers);
-    setActiveMatches(newMatches);
-    saveToLocal(nextPlayers, newMatches, completedMatches, config);
+    setActiveMatches(nextMatches);
+    saveToLocal(nextPlayers, nextMatches, completedMatches, config);
   };
 
   // Complete Match Winner Declaration logic
@@ -406,6 +413,9 @@ export default function App() {
     setConfettiMessage(`🏆 ${winnerNames} Won the Match!`);
     setConfettiActive(true);
     setTimeout(() => setConfettiActive(false), 4500);
+
+    // Trigger End of Match Summary Modal
+    setSummaryMatch(finalMatch);
   };
 
   const handleUpdateScore = (matchId: string, team: 'A' | 'B', delta: number) => {
@@ -546,7 +556,11 @@ export default function App() {
                   Club Rotation
                 </span>
               </div>
-              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{config.clubName}</p>
+              {config.clubName ? (
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{config.clubName}</p>
+              ) : (
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Active Club Session</p>
+              )}
             </div>
           </div>
 
@@ -709,8 +723,25 @@ export default function App() {
             {/* Scrollable Leaderboard */}
             <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
               {players.length === 0 ? (
-                <div className="text-center py-8 text-xs text-slate-500">
-                  No players added yet. Use the input box above to load roster.
+                <div className="text-center py-8 px-4 space-y-3 rounded-2xl bg-slate-900/10 border border-dashed border-slate-800/80 p-5">
+                  <div className="text-2xl">👥</div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-slate-300 uppercase">Roster is empty</p>
+                    <p className="text-[10px] text-slate-500 leading-normal max-w-[200px] mx-auto">
+                      Add player names above to start, or load a preset of 12 test-players below!
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlayers(SAMPLE_ROSTER);
+                      saveToLocal(SAMPLE_ROSTER, activeMatches, completedMatches, config);
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-[9px] font-black uppercase text-slate-950 hover:bg-slate-100 transition-colors cursor-pointer"
+                    style={{ backgroundColor: primaryColor }}
+                  >
+                    ⚡ Seed 12 Demo Players
+                  </button>
                 </div>
               ) : (
                 [...players]
@@ -769,6 +800,20 @@ export default function App() {
                         </div>
 
                         <div className="flex items-center gap-2">
+                          {/* Court Pin Lock Selector */}
+                          <select
+                            value={p.courtPin || 'any'}
+                            onChange={(e) => handleTogglePlayerCourtPin(p.id, e.target.value as any)}
+                            className="bg-slate-900 hover:bg-slate-850 text-slate-400 font-bold text-[8px] uppercase tracking-wide px-1.5 py-1 rounded border border-slate-800/80 focus:outline-none focus:text-slate-200 cursor-pointer transition-colors"
+                            title="Lock player to a specific court, or keep at '🔓 Shuffle' to let them rotate dynamically on any court"
+                          >
+                            <option value="any">🔓 Shuffle</option>
+                            <option value="court_1">📍 C1</option>
+                            {config.activeCourts >= 2 && <option value="court_2">📍 C2</option>}
+                            {config.activeCourts >= 3 && <option value="court_3">📍 C3</option>}
+                            {config.activeCourts >= 4 && <option value="court_4">📍 C4</option>}
+                          </select>
+
                           <span className="text-xs font-black font-mono" style={{ color: p.netWins >= 0 ? '#10b981' : '#f43f5e' }}>
                             {p.netWins >= 0 ? `+${p.netWins}` : p.netWins}
                           </span>
@@ -1229,6 +1274,22 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Club Name Input */}
+              <div className="space-y-3">
+                <label className="text-[10px] text-slate-500 font-bold uppercase block">Club & Venue Name</label>
+                <input
+                  type="text"
+                  value={config.clubName}
+                  onChange={(e) => {
+                    const nextConf = { ...config, clubName: e.target.value };
+                    setConfig(nextConf);
+                    saveToLocal(players, activeMatches, completedMatches, nextConf);
+                  }}
+                  placeholder="Enter club name (e.g., Vantage Club)"
+                  className="w-full bg-slate-950 border border-slate-900 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-slate-800"
+                />
+              </div>
+
               {/* Racket Sport Theme Switcher */}
               <div className="space-y-3">
                 <label className="text-[10px] text-slate-500 font-bold uppercase block">Racket Sport Mode</label>
@@ -1262,33 +1323,25 @@ export default function App() {
               {/* Court Allocator Settings */}
               <div className="space-y-3">
                 <label className="text-[10px] text-slate-500 font-bold uppercase block">Active Courts rented</label>
-                <div className="grid grid-cols-2 gap-2 bg-slate-900 p-1 rounded-xl">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const nextConf = { ...config, activeCourts: 1 as const };
-                      setConfig(nextConf);
-                      saveToLocal(players, activeMatches, completedMatches, nextConf);
-                    }}
-                    className={`py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
-                      config.activeCourts === 1 ? 'bg-slate-950 text-white shadow' : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    1 Court (4 players active)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const nextConf = { ...config, activeCourts: 2 as const };
-                      setConfig(nextConf);
-                      saveToLocal(players, activeMatches, completedMatches, nextConf);
-                    }}
-                    className={`py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
-                      config.activeCourts === 2 ? 'bg-slate-950 text-white shadow' : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    2 Courts (8 players active)
-                  </button>
+                <div className="grid grid-cols-4 gap-1.5 bg-slate-900 p-1 rounded-xl">
+                  {[1, 2, 3, 4].map((num) => (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => {
+                        const nextConf = { ...config, activeCourts: num as 1 | 2 | 3 | 4 };
+                        setConfig(nextConf);
+                        saveToLocal(players, activeMatches, completedMatches, nextConf);
+                      }}
+                      className={`py-2 text-center text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                        config.activeCourts === num 
+                          ? 'bg-slate-950 text-white shadow font-black' 
+                          : 'text-slate-400 hover:text-white hover:bg-slate-850/40 text-[11px]'
+                      }`}
+                    >
+                      {num} {num === 1 ? 'Court' : 'Courts'}
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -1499,7 +1552,7 @@ export default function App() {
                 )}
                 <div>
                   <h2 className="text-sm font-black text-white uppercase tracking-wider font-mono">
-                    {config.clubName}
+                    {config.clubName || 'CourtCraft Live'}
                   </h2>
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                     {courtLabel} — Live Scoreboard
@@ -1636,6 +1689,106 @@ export default function App() {
               </div>
             </div>
 
+          </div>
+        );
+      })()}
+
+      {/* End of Match Summary Modal */}
+      {summaryMatch && (() => {
+        const courtLabel = summaryMatch.courtId === 'court_1' ? 'Court 1' : summaryMatch.courtId === 'court_2' ? 'Court 2' : summaryMatch.courtId === 'court_3' ? 'Court 3' : 'Court 4';
+        const teamANames = summaryMatch.teamA.map(getPlayerName).join(' & ');
+        const teamBNames = summaryMatch.teamB.map(getPlayerName).join(' & ');
+        const winner = summaryMatch.winner;
+        
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-xs" onClick={() => setSummaryMatch(null)} />
+
+            {/* Modal Box */}
+            <div className="relative w-full max-w-md bg-[#040914] border border-slate-900 rounded-3xl p-6 shadow-2xl z-10 animate-fade-in text-center space-y-6">
+              
+              {/* Top Trophy header */}
+              <div className="flex flex-col items-center space-y-2">
+                <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-3xl animate-bounce">
+                  🏆
+                </div>
+                <div className="space-y-0.5">
+                  <h3 className="text-xs font-black uppercase text-emerald-400 tracking-wider">Match Completed</h3>
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{courtLabel} Scoreboard Summary</p>
+                </div>
+              </div>
+
+              {/* Match Card Scores Comparison Grid */}
+              <div className="grid grid-cols-7 gap-1 items-center bg-slate-950/40 p-4 rounded-xl border border-slate-900">
+                {/* Team A names */}
+                <div className="col-span-3 text-center space-y-1">
+                  <p className={`text-xs font-bold truncate ${winner === 'A' ? 'text-white font-black' : 'text-slate-400 opacity-60'}`}>
+                    {teamANames}
+                  </p>
+                  <p className="text-[9px] text-slate-500 uppercase font-mono font-bold">Team A</p>
+                  {winner === 'A' && (
+                    <span className="text-[8px] bg-emerald-950 text-emerald-400 font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
+                      Winners
+                    </span>
+                  )}
+                </div>
+
+                {/* Score A */}
+                <div className="col-span-1 text-center font-mono text-xl font-black text-white">
+                  {summaryMatch.scoreA}
+                </div>
+
+                {/* Separator */}
+                <div className="col-span-1 text-center text-slate-600 font-mono text-xs">
+                  :
+                </div>
+
+                {/* Score B */}
+                <div className="col-span-1 text-center font-mono text-xl font-black text-white">
+                  {summaryMatch.scoreB}
+                </div>
+
+                {/* Team B names */}
+                <div className="col-span-3 text-center space-y-1">
+                  <p className={`text-xs font-bold truncate ${winner === 'B' ? 'text-white font-black' : 'text-slate-400 opacity-60'}`}>
+                    {teamBNames}
+                  </p>
+                  <p className="text-[9px] text-slate-500 uppercase font-mono font-bold">Team B</p>
+                  {winner === 'B' && (
+                    <span className="text-[8px] bg-emerald-950 text-emerald-400 font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
+                      Winners
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setSummaryMatch(null)}
+                  className="py-2.5 rounded-xl text-xs font-bold text-slate-400 bg-slate-900 border border-slate-850 hover:bg-slate-850 hover:text-white transition-colors cursor-pointer"
+                >
+                  Close Summary
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSummaryMatch(null);
+                    // Slight timeout to let modal close cleanly before triggering assignment
+                    setTimeout(() => {
+                      handleAutoAssign();
+                    }, 150);
+                  }}
+                  className="py-2.5 rounded-xl text-xs font-black uppercase text-slate-950 transition-transform active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
+                  style={{ backgroundColor: primaryColor }}
+                >
+                  🚀 Next Rotation
+                </button>
+              </div>
+
+            </div>
           </div>
         );
       })()}
